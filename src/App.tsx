@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Mic, Loader2, Volume2, AlertCircle, RefreshCw, Settings, X, Key } from 'lucide-react';
+import { Mic, Loader2, Volume2, AlertCircle, RefreshCw, Settings, X, Key, Activity } from 'lucide-react';
 import { recognizeSpeech, speakText, stopAllSpeech } from './lib/speech';
 import { translateText } from './lib/translator';
+import { useQuota } from './lib/quota';
 
 type User = 1 | 2;
 
@@ -28,6 +29,9 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [customApiKey, setCustomApiKey] = useState(() => localStorage.getItem('GEMINI_CUSTOM_KEY') || '');
 
+  // Quota usage tracker
+  const { rpmCount, rpdCount, isRpmLimited, isRpdLimited, recordRequest, MAX_RPM, MAX_RPD } = useQuota();
+
   useEffect(() => {
     // Cleanup on unmount
     return () => {
@@ -36,6 +40,11 @@ export default function App() {
   }, []);
 
   const handleStartTurn = async (speaker: User) => {
+    if (isRpmLimited || isRpdLimited) {
+      setErrorMsg(`API Rate Limit Reached. Please wait before translating again. (Free Tier Warning)`);
+      return;
+    }
+
     // Reset state for new turn
     setErrorMsg(null);
     setFinalText('');
@@ -65,8 +74,14 @@ export default function App() {
       setFinalText(spokenText);
       setInterimText(''); // Clear interim
 
+      // Verify limits again before triggering the actual API cost
+      if (isRpmLimited || isRpdLimited) {
+        throw new Error("API Limit reached mid-transaction. Translation aborted.");
+      }
+
       // 2. Translate
       setStatus('translating');
+      recordRequest(); // Log the transaction against our limit tracker!
       const translation = await translateText(spokenText, sourceLangName, targetLangName, customApiKey);
       setTranslatedText(translation);
 
@@ -177,13 +192,51 @@ export default function App() {
             interimText={activeSpeaker === 1 ? interimText : ''}
             onStart={() => handleStartTurn(1)}
             onStop={handleStop}
+            isDisabled={isRpmLimited || isRpdLimited}
           />
 
-          {/* Swap Languages Button */}
-          <div className="flex justify-center items-center lg:-mx-4 z-10 shrink-0">
+          {/* Center Column - Swap Languages & API Quota Tracker */}
+          <div className="flex flex-col justify-center items-center lg:-mx-4 z-10 shrink-0 gap-6">
+            
+            {/* Free Tier API Quota Tracker */}
+            <div className="bg-white/5 border border-white/10 rounded-xl p-4 w-48 md:w-56 backdrop-blur-sm shadow-xl flex flex-col gap-3">
+              <div className="flex items-center gap-2 mb-1">
+                <Activity className={`w-4 h-4 ${isRpmLimited || isRpdLimited ? 'text-red-400' : 'text-purple-400'}`} />
+                <span className="text-[10px] font-bold tracking-widest uppercase text-white/60">Free Tier Usage</span>
+              </div>
+              
+              {/* RPM Graph */}
+              <div className="flex flex-col gap-1">
+                <div className="flex justify-between text-[9px] uppercase tracking-wider text-white/40">
+                  <span>Req/Min</span>
+                  <span className={isRpmLimited ? 'text-red-400 font-bold' : ''}>{rpmCount} / {MAX_RPM}</span>
+                </div>
+                <div className="h-1.5 w-full bg-black/40 rounded-full overflow-hidden">
+                  <div 
+                    className={`h-full transition-all duration-300 ${isRpmLimited ? 'bg-red-500' : (rpmCount > MAX_RPM * 0.7 ? 'bg-yellow-500' : 'bg-emerald-500')}`}
+                    style={{ width: `${Math.min(100, (rpmCount / MAX_RPM) * 100)}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* RPD Graph */}
+              <div className="flex flex-col gap-1">
+                <div className="flex justify-between text-[9px] uppercase tracking-wider text-white/40">
+                  <span>Req/Day</span>
+                  <span className={isRpdLimited ? 'text-red-400 font-bold' : ''}>{rpdCount} / {MAX_RPD}</span>
+                </div>
+                <div className="h-1.5 w-full bg-black/40 rounded-full overflow-hidden">
+                  <div 
+                    className={`h-full transition-all duration-300 bg-blue-500`}
+                    style={{ width: `${Math.min(100, (rpdCount / MAX_RPD) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+
             <button 
               onClick={swapLanguages}
-              className="bg-[#0A0A0B] p-4 rounded-full border border-white/10 text-white/40 hover:text-white hover:border-white/30 hover:scale-105 transition-all focus:outline-none focus:ring-1 focus:ring-white/20"
+              className="bg-[#0A0A0B] p-4 rounded-full border border-white/10 text-white/40 hover:text-white hover:border-white/30 hover:scale-105 transition-all focus:outline-none focus:ring-1 focus:ring-white/20 shadow-lg"
               title="Swap Languages"
             >
               <RefreshCw className="w-5 h-5" />
@@ -202,6 +255,7 @@ export default function App() {
             interimText={activeSpeaker === 2 ? interimText : ''}
             onStart={() => handleStartTurn(2)}
             onStop={handleStop}
+            isDisabled={isRpmLimited || isRpdLimited}
           />
         </div>
 
@@ -272,6 +326,7 @@ interface UserPanelProps {
   interimText: string;
   onStart: () => void;
   onStop: () => void;
+  isDisabled?: boolean;
 }
 
 function UserPanel({ 
@@ -284,7 +339,8 @@ function UserPanel({
   finalText, 
   interimText, 
   onStart, 
-  onStop 
+  onStop,
+  isDisabled = false
 }: UserPanelProps) {
   
   // Decide panel border and glow state based on Sophisticated Dark theme
@@ -385,9 +441,9 @@ function UserPanel({
           ) : (
             <button
               onClick={onStart}
-              disabled={status !== 'idle' && !isActive}
+              disabled={(status !== 'idle' && !isActive) || isDisabled}
               className={`w-12 h-12 md:w-14 md:h-14 rounded-full flex items-center justify-center transition-all duration-300 transform border 
-                ${status !== 'idle' ? 'border-white/5 bg-white/5 text-white/20 cursor-not-allowed scale-95' 
+                ${(status !== 'idle' || isDisabled) ? 'border-white/5 bg-white/5 text-white/20 cursor-not-allowed scale-95' 
                                     : 'border-white/20 bg-white/5 text-white/80 hover:bg-white hover:text-black hover:scale-105 active:scale-95'}
               `}
               aria-label="Start recording"
