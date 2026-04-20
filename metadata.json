@@ -1,0 +1,8 @@
+{
+  "name": "BhashaFlow",
+  "description": "Real-time bi-directional speech-to-speech translation application.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": []
+}
